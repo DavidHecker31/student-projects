@@ -28,6 +28,9 @@ Usage:
     m.presence.submatrix(mag_ids, family_ids)     # scipy COO submatrix
     m.presence.family_prevalence(family_id)       # how many MAGs carry it
     m.presence.families_by_prevalence(0.99, 1.0)  # e.g. "core genome" ids
+    m.presence.family_prevalences()               # prevalence of every family (u32)
+    m.presence.mag_gene_counts()                  # family count of every MAG (u32)
+    m.presence.rows(mag_ids)                      # many rows at once: (offsets, family_ids)
     m.members.genes_for(mag_id, family_id)        # exact member genes in one cell
     m.dicts.mag_name(mag_id) / m.dicts.mag_id(name)
     m.dicts.family_representative_gene(family_id)
@@ -223,6 +226,48 @@ class SparseMatrix:
         frac = counts / self.dicts.num_mags
         return np.nonzero((frac >= min_frac) & (frac <= max_frac))[0]
 
+    # ---- Tier 3: bulk queries — many ids per call, for clients that would otherwise loop ----
+
+    def _check_mag_ids(self, mag_ids):
+        ids = np.asarray(mag_ids, dtype=np.int64).ravel()
+        if ids.size and (ids.min() < 0 or ids.max() >= self.dicts.num_mags):
+            raise ValueError(f"mag_ids out of range (0..{self.dicts.num_mags})")
+        return ids
+
+    def family_prevalences(self, start=0, stop=None):
+        """family_prevalence of families start..stop-1 (default: all) as u32.
+        Only reads csc.indptr; all 96 million families are 384 MB, so large
+        datasets can be read in ranges."""
+        n = self.dicts.num_families
+        stop = n if stop is None else stop
+        if not (0 <= start <= stop <= n):
+            raise ValueError(f"family range {start}..{stop} out of range (0..{n})")
+        return np.diff(self.csc_indptr[start:stop + 1]).astype(np.uint32)
+
+    def mag_gene_counts(self, mag_ids=None):
+        """mag_gene_count of many MAGs (default: all) as u32. Only reads csr.indptr."""
+        if mag_ids is None:
+            return np.diff(self.csr_indptr).astype(np.uint32)
+        ids = self._check_mag_ids(mag_ids)
+        return (self.csr_indptr[ids + 1] - self.csr_indptr[ids]).astype(np.uint32)
+
+    def rows(self, mag_ids, with_values=False):
+        """Many rows in one call, CSR-style: the families of mag_ids[i] are
+        family_ids[offsets[i]:offsets[i + 1]]. Returns (offsets, family_ids),
+        or (offsets, family_ids, values) with with_values=True."""
+        ids = self._check_mag_ids(mag_ids)
+        starts = self.csr_indptr[ids].astype(np.int64)
+        ends = self.csr_indptr[ids + 1].astype(np.int64)
+        offsets = np.zeros(len(ids) + 1, dtype=np.int64)
+        np.cumsum(ends - starts, out=offsets[1:])
+        family_ids = np.empty(offsets[-1], dtype=np.uint32)
+        values = np.empty(offsets[-1], dtype=np.uint32) if with_values else None
+        for i, (s, e) in enumerate(zip(starts, ends)):
+            family_ids[offsets[i]:offsets[i + 1]] = self.csr_indices[s:e]
+            if with_values:
+                values[offsets[i]:offsets[i + 1]] = self.csr_data[s:e]
+        return (offsets, family_ids, values) if with_values else (offsets, family_ids)
+
 
 class PresenceView:
     """Presence matrix derived from paralog's structure, with no storage of its
@@ -260,6 +305,18 @@ class PresenceView:
 
     def families_by_prevalence(self, min_frac=0.0, max_frac=1.0):
         return self._paralog.families_by_prevalence(min_frac, max_frac)
+
+    def family_prevalences(self, start=0, stop=None):
+        return self._paralog.family_prevalences(start, stop)
+
+    def mag_gene_counts(self, mag_ids=None):
+        return self._paralog.mag_gene_counts(mag_ids)
+
+    def rows(self, mag_ids, with_values=False):
+        if not with_values:
+            return self._paralog.rows(mag_ids)
+        offsets, family_ids, values = self._paralog.rows(mag_ids, with_values=True)
+        return offsets, family_ids, np.ones_like(values, dtype=np.uint8)
 
 
 class MembersView:

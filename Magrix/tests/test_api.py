@@ -284,3 +284,62 @@ def test_container_is_the_only_binary_source_the_api_needs(built_pipeline, matri
     family_ids, values = matrices.paralog.row(mag_id)
     assert isinstance(family_ids, np.ndarray)
     assert isinstance(values, np.ndarray)
+
+
+# ---- bulk queries (Tier 3) must agree with the single-id calls --------------
+
+def test_family_prevalences_match_single_calls(matrices):
+    p = matrices.paralog
+    all_prev = p.family_prevalences()
+    assert all_prev.dtype == np.uint32 and len(all_prev) == matrices.dicts.num_families
+    for f in range(matrices.dicts.num_families):
+        assert all_prev[f] == p.family_prevalence(f)
+    assert np.array_equal(p.family_prevalences(10, 50), all_prev[10:50])
+    assert len(p.family_prevalences(7, 7)) == 0
+
+
+def test_mag_gene_counts_match_single_calls(matrices):
+    p = matrices.paralog
+    counts = p.mag_gene_counts()
+    assert counts.dtype == np.uint32 and len(counts) == matrices.dicts.num_mags
+    for mag_id in range(matrices.dicts.num_mags):
+        assert counts[mag_id] == p.mag_gene_count(mag_id)
+    assert np.array_equal(p.mag_gene_counts([3, 1, 2]), counts[[3, 1, 2]])
+
+
+def test_rows_match_single_rows(matrices):
+    p = matrices.paralog
+    ids = list(range(0, matrices.dicts.num_mags, 3)) + [0]  # also a repeated id
+    offsets, family_ids, values = p.rows(ids, with_values=True)
+    assert len(offsets) == len(ids) + 1
+    for i, mag_id in enumerate(ids):
+        fam, val = p.row(mag_id)
+        assert np.array_equal(family_ids[offsets[i]:offsets[i + 1]], fam)
+        assert np.array_equal(values[offsets[i]:offsets[i + 1]], val)
+    offsets_only, family_ids_only = p.rows(ids)
+    assert np.array_equal(offsets_only, offsets) and np.array_equal(family_ids_only, family_ids)
+    empty_offsets, empty_ids = p.rows([])
+    assert list(empty_offsets) == [0] and len(empty_ids) == 0
+
+
+def test_presence_bulk_queries_match_paralog(matrices):
+    ids = [0, 1, 2]
+    assert np.array_equal(matrices.presence.family_prevalences(), matrices.paralog.family_prevalences())
+    assert np.array_equal(matrices.presence.mag_gene_counts(ids), matrices.paralog.mag_gene_counts(ids))
+    offsets, family_ids, values = matrices.presence.rows(ids, with_values=True)
+    assert np.array_equal(family_ids, matrices.paralog.rows(ids)[1])
+    assert np.all(values == 1)
+
+
+def test_bulk_queries_reject_out_of_range_ids(matrices):
+    p = matrices.paralog
+    with pytest.raises(ValueError):
+        p.rows([matrices.dicts.num_mags])
+    with pytest.raises(ValueError):
+        p.rows([-1])
+    with pytest.raises(ValueError):
+        p.mag_gene_counts([-1])
+    with pytest.raises(ValueError):
+        p.family_prevalences(0, matrices.dicts.num_families + 1)
+    with pytest.raises(ValueError):
+        p.family_prevalences(5, 4)
